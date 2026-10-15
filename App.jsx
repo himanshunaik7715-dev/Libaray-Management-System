@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 
 // Form-encoded POST helper as required by PRD and ARCHITECTURE
 async function postForm(url, data) {
@@ -6,19 +6,109 @@ async function postForm(url, data) {
   for (const [key, value] of Object.entries(data)) {
     params.append(key, value);
   }
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-    },
-    body: params.toString(),
-  });
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      },
+      body: params.toString(),
+    });
+  } catch (netErr) {
+    throw new Error('Network error: Unable to communicate with the server. Please check your connection.');
+  }
 
   const json = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(json.error || `HTTP error ${response.status}`);
+    throw new Error(json.error || `Server returned error (${response.status})`);
   }
   return json;
+}
+
+// Validation helper for positive integer IDs (1 to 2147483647)
+function validateIntegerId(value, fieldName) {
+  if (!value || typeof value !== 'string' || !value.trim()) {
+    return `${fieldName} is required.`;
+  }
+  const trimmed = value.trim();
+  // Reject characters like e, E, +, -, decimal points, scientific notation
+  if (!/^[0-9]+$/.test(trimmed)) {
+    return `${fieldName} must contain digits only (no signs, decimals, or scientific notation).`;
+  }
+  // Reject 0 and values with only zeroes
+  if (trimmed === '0' || /^0+$/.test(trimmed)) {
+    return `${fieldName} must be a positive integer greater than 0.`;
+  }
+  const num = Number(trimmed);
+  if (!Number.isSafeInteger(num) || num <= 0 || num > 2147483647) {
+    return `${fieldName} must be a valid positive integer between 1 and 2147483647.`;
+  }
+  return null;
+}
+
+// Validation helper for member full name (supports international Unicode letters and spaces)
+function validateMemberName(rawName) {
+  if (!rawName || typeof rawName !== 'string' || !rawName.trim()) {
+    return { valid: false, error: 'Member full name is required.' };
+  }
+  const trimmed = rawName.trim();
+  // Explicitly reject numeric characters
+  if (/\d/.test(trimmed)) {
+    return { valid: false, error: 'Member name cannot contain numbers.' };
+  }
+  // Normalize repeated internal spaces to single spaces first
+  const normalized = trimmed.replace(/\s+/g, ' ');
+  // Validate Unicode letters, spaces, hyphens, and apostrophes
+  if (!/^[\p{L}]+(?:[\s'-][\p{L}]+)*$/u.test(normalized)) {
+    return { valid: false, error: 'Member name must contain only alphabetic letters and spaces.' };
+  }
+  return { valid: true, normalized };
+}
+
+// Validation helper for book title
+function validateBookTitle(rawTitle) {
+  if (!rawTitle || typeof rawTitle !== 'string' || !rawTitle.trim()) {
+    return { valid: false, error: 'Book title is required and cannot be empty.' };
+  }
+  const trimmed = rawTitle.trim();
+  const normalized = trimmed.replace(/\s+/g, ' ');
+  // Reject numeric-only titles (project-specific restriction)
+  if (/^[0-9]+$/.test(normalized)) {
+    return { valid: false, error: 'Book title cannot be numeric-only.' };
+  }
+  // Must contain alphabetic characters (rejects @@@, !!!, etc.)
+  if (!/\p{L}/u.test(normalized)) {
+    return { valid: false, error: 'Book title must contain alphabetic characters.' };
+  }
+  // Allowed characters: letters, numbers, spaces, common punctuation (. , : ; ' " ( ) & ! ? + # / -)
+  if (!/^[\p{L}0-9\s.,:;'"()&!?+#\/-]+$/u.test(normalized)) {
+    return { valid: false, error: 'Book title contains invalid special characters.' };
+  }
+  return { valid: true, normalized };
+}
+
+// Validation helper for author name
+function validateAuthorName(rawAuthor) {
+  if (!rawAuthor || typeof rawAuthor !== 'string' || !rawAuthor.trim()) {
+    return { valid: false, error: 'Author name is required and cannot be empty.' };
+  }
+  const trimmed = rawAuthor.trim();
+  const normalized = trimmed.replace(/\s+/g, ' ');
+  // Reject numeric characters
+  if (/\d/.test(normalized)) {
+    return { valid: false, error: 'Author name cannot contain numbers.' };
+  }
+  // Must contain alphabetic characters
+  if (!/\p{L}/u.test(normalized)) {
+    return { valid: false, error: 'Author name must contain alphabetic characters.' };
+  }
+  // Allowed: multi-word names starting with letters, periods, apostrophes, hyphens
+  if (!/^[\p{L}][\p{L}.'-]*(?:\s+[\p{L}][\p{L}.'-]*)*$/u.test(normalized)) {
+    return { valid: false, error: 'Author name must contain only alphabetic letters, spaces, and valid punctuation (., -, \').' };
+  }
+  return { valid: true, normalized };
 }
 
 export default function App() {
@@ -26,7 +116,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('books');
 
   // Core data states
-  const [books, setBooks] = useState([]);
+  const [allBooks, setAllBooks] = useState([]);
+  const [catalogBooks, setCatalogBooks] = useState([]);
   const [members, setMembers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [serverError, setServerError] = useState('');
@@ -34,29 +125,58 @@ export default function App() {
   // Books tab form and search states
   const [newTitle, setNewTitle] = useState('');
   const [newAuthor, setNewAuthor] = useState('');
+  const [titleError, setTitleError] = useState('');
+  const [authorError, setAuthorError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [filterMode, setFilterMode] = useState('all'); // 'all' | 'available'
   const [bookFeedback, setBookFeedback] = useState(null);
+  const [isSubmittingBook, setIsSubmittingBook] = useState(false);
 
   // Members tab form state
   const [newMemberName, setNewMemberName] = useState('');
+  const [memberNameError, setMemberNameError] = useState('');
   const [memberFeedback, setMemberFeedback] = useState(null);
+  const [isSubmittingMember, setIsSubmittingMember] = useState(false);
 
   // Issue / Return tab form states
   const [issueBookId, setIssueBookId] = useState('');
   const [issueMemberId, setIssueMemberId] = useState('');
   const [issueFeedback, setIssueFeedback] = useState(null);
+  const [isSubmittingIssue, setIsSubmittingIssue] = useState(false);
 
   const [returnBookId, setReturnBookId] = useState('');
   const [returnFeedback, setReturnFeedback] = useState(null);
+  const [isSubmittingReturn, setIsSubmittingReturn] = useState(false);
 
-  // Fetch all books
-  const fetchBooks = async () => {
+  // Fetch all books (unfiltered) for total counters and quick selection chips
+  const fetchAllBooks = async () => {
     try {
       const res = await fetch('/api/books');
       if (!res.ok) throw new Error('Failed to load books');
       const data = await res.json();
-      setBooks(data);
+      setAllBooks(data);
+      setServerError('');
+    } catch (err) {
+      setServerError('Unable to connect to Core Java backend. Ensure LibraryServer is running on port 8080.');
+    }
+  };
+
+  // Fetch catalog books with search and filter using URLSearchParams
+  const fetchCatalogBooks = async (search = searchQuery, filter = filterMode) => {
+    try {
+      const params = new URLSearchParams();
+      if (search && search.trim()) {
+        params.append('search', search.trim());
+      }
+      if (filter === 'available') {
+        params.append('filter', 'available');
+      }
+      const queryStr = params.toString();
+      const url = queryStr ? `/api/books?${queryStr}` : '/api/books';
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Failed to load catalog');
+      const data = await res.json();
+      setCatalogBooks(data);
       setServerError('');
     } catch (err) {
       setServerError('Unable to connect to Core Java backend. Ensure LibraryServer is running on port 8080.');
@@ -78,32 +198,35 @@ export default function App() {
 
   // Initial load
   useEffect(() => {
-    Promise.all([fetchBooks(), fetchMembers()]).finally(() => setLoading(false));
+    Promise.all([fetchAllBooks(), fetchMembers()]).finally(() => setLoading(false));
   }, []);
 
-  // Filtered books (Search title or author, case-insensitive + Available filter)
-  const filteredBooks = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    return books.filter((b) => {
-      if (filterMode === 'available' && !b.available) return false;
-      if (!q) return true;
-      const matchTitle = b.title.toLowerCase().includes(q);
-      const matchAuthor = b.author.toLowerCase().includes(q);
-      return matchTitle || matchAuthor;
-    });
-  }, [books, searchQuery, filterMode]);
+  // Update catalog when search query or filter mode changes
+  useEffect(() => {
+    fetchCatalogBooks(searchQuery, filterMode);
+  }, [searchQuery, filterMode]);
 
   // Handler: Add Book
   const handleAddBook = async (e) => {
     e.preventDefault();
-    if (!newTitle.trim() || !newAuthor.trim()) {
-      setBookFeedback({ type: 'error', message: 'Title and author are required.' });
+    const titleVal = validateBookTitle(newTitle);
+    if (!titleVal.valid) {
+      setBookFeedback({ type: 'error', message: titleVal.error });
+      setTitleError(titleVal.error);
       return;
     }
+    const authorVal = validateAuthorName(newAuthor);
+    if (!authorVal.valid) {
+      setBookFeedback({ type: 'error', message: authorVal.error });
+      setAuthorError(authorVal.error);
+      return;
+    }
+
+    setIsSubmittingBook(true);
     try {
       const created = await postForm('/api/books', {
-        title: newTitle.trim(),
-        author: newAuthor.trim(),
+        title: titleVal.normalized,
+        author: authorVal.normalized,
       });
       setBookFeedback({
         type: 'success',
@@ -111,45 +234,64 @@ export default function App() {
       });
       setNewTitle('');
       setNewAuthor('');
-      fetchBooks();
+      setTitleError('');
+      setAuthorError('');
+      await Promise.all([fetchAllBooks(), fetchCatalogBooks(searchQuery, filterMode)]);
     } catch (err) {
       setBookFeedback({ type: 'error', message: err.message });
+    } finally {
+      setIsSubmittingBook(false);
     }
   };
 
   // Handler: Register Member
   const handleRegisterMember = async (e) => {
     e.preventDefault();
-    if (!newMemberName.trim()) {
-      setMemberFeedback({ type: 'error', message: 'Member name is required.' });
+    const validation = validateMemberName(newMemberName);
+    if (!validation.valid) {
+      setMemberFeedback({ type: 'error', message: validation.error });
       return;
     }
+
+    setIsSubmittingMember(true);
     try {
       const created = await postForm('/api/members', {
-        name: newMemberName.trim(),
+        name: validation.normalized,
       });
       setMemberFeedback({
         type: 'success',
         message: `Member "${created.name}" registered successfully with ID #${created.id}.`,
       });
       setNewMemberName('');
-      fetchMembers();
+      setMemberNameError('');
+      await fetchMembers();
     } catch (err) {
+      // Preserves newMemberName on failed registration (e.g. 409 Conflict)
       setMemberFeedback({ type: 'error', message: err.message });
+    } finally {
+      setIsSubmittingMember(false);
     }
   };
 
   // Handler: Issue Book
   const handleIssueBook = async (e) => {
     e.preventDefault();
-    if (!issueBookId || !issueMemberId) {
-      setIssueFeedback({ type: 'error', message: 'Please enter both Book ID and Member ID.' });
+    const bookIdErr = validateIntegerId(issueBookId, 'Book ID');
+    if (bookIdErr) {
+      setIssueFeedback({ type: 'error', message: bookIdErr });
       return;
     }
+    const memberIdErr = validateIntegerId(issueMemberId, 'Member ID');
+    if (memberIdErr) {
+      setIssueFeedback({ type: 'error', message: memberIdErr });
+      return;
+    }
+
+    setIsSubmittingIssue(true);
     try {
       const res = await postForm('/api/issue', {
-        bookId: issueBookId,
-        memberId: issueMemberId,
+        bookId: issueBookId.trim(),
+        memberId: issueMemberId.trim(),
       });
       setIssueFeedback({
         type: 'success',
@@ -158,22 +300,27 @@ export default function App() {
       });
       setIssueBookId('');
       setIssueMemberId('');
-      fetchBooks();
+      await Promise.all([fetchAllBooks(), fetchCatalogBooks(searchQuery, filterMode)]);
     } catch (err) {
       setIssueFeedback({ type: 'error', message: err.message });
+    } finally {
+      setIsSubmittingIssue(false);
     }
   };
 
   // Handler: Return Book
   const handleReturnBook = async (e) => {
     e.preventDefault();
-    if (!returnBookId) {
-      setReturnFeedback({ type: 'error', message: 'Please enter the Book ID to return.' });
+    const bookIdErr = validateIntegerId(returnBookId, 'Book ID');
+    if (bookIdErr) {
+      setReturnFeedback({ type: 'error', message: bookIdErr });
       return;
     }
+
+    setIsSubmittingReturn(true);
     try {
       const res = await postForm('/api/return', {
-        bookId: returnBookId,
+        bookId: returnBookId.trim(),
       });
       setReturnFeedback({
         type: 'success',
@@ -181,15 +328,17 @@ export default function App() {
         data: res,
       });
       setReturnBookId('');
-      fetchBooks();
+      await Promise.all([fetchAllBooks(), fetchCatalogBooks(searchQuery, filterMode)]);
     } catch (err) {
       setReturnFeedback({ type: 'error', message: err.message });
+    } finally {
+      setIsSubmittingReturn(false);
     }
   };
 
   // Helper lists for Quick Selection
-  const availableBooks = books.filter((b) => b.available);
-  const issuedBooks = books.filter((b) => !b.available);
+  const availableBooks = allBooks.filter((b) => b.available);
+  const issuedBooks = allBooks.filter((b) => !b.available);
 
   return (
     <div className="app-container">
@@ -213,7 +362,7 @@ export default function App() {
             className={`tab-button ${activeTab === 'books' ? 'active' : ''}`}
             onClick={() => setActiveTab('books')}
           >
-            📖 Book Catalog ({books.length})
+            📖 Book Catalog ({allBooks.length})
           </button>
           <button
             type="button"
@@ -269,9 +418,19 @@ export default function App() {
                     className="cream-input"
                     placeholder="e.g. Clean Code"
                     value={newTitle}
-                    onChange={(e) => setNewTitle(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setNewTitle(val);
+                      if (val.trim()) {
+                        const v = validateBookTitle(val);
+                        setTitleError(v.valid ? '' : v.error);
+                      } else {
+                        setTitleError('');
+                      }
+                    }}
                     required
                   />
+                  {titleError && <span className="inline-error">{titleError}</span>}
                 </div>
 
                 <div className="form-group">
@@ -282,13 +441,23 @@ export default function App() {
                     className="cream-input"
                     placeholder="e.g. Robert C. Martin"
                     value={newAuthor}
-                    onChange={(e) => setNewAuthor(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setNewAuthor(val);
+                      if (val.trim()) {
+                        const v = validateAuthorName(val);
+                        setAuthorError(v.valid ? '' : v.error);
+                      } else {
+                        setAuthorError('');
+                      }
+                    }}
                     required
                   />
+                  {authorError && <span className="inline-error">{authorError}</span>}
                 </div>
 
-                <button type="submit" className="pill-button gold-cta">
-                  Add Book
+                <button type="submit" className="pill-button gold-cta" disabled={isSubmittingBook}>
+                  {isSubmittingBook ? 'Adding...' : 'Add Book'}
                 </button>
               </form>
 
@@ -307,7 +476,7 @@ export default function App() {
                     <span className="icon-wrapper">📚</span> Book Catalog
                   </h2>
                   <span className="section-note">
-                    Showing {filteredBooks.length} of {books.length} items (Linear Search O(B))
+                    Showing {catalogBooks.length} of {allBooks.length} items (Linear Search O(B))
                   </span>
                 </div>
 
@@ -318,7 +487,7 @@ export default function App() {
                     className={`filter-chip ${filterMode === 'all' ? 'active' : ''}`}
                     onClick={() => setFilterMode('all')}
                   >
-                    All Books ({books.length})
+                    All Books ({allBooks.length})
                   </button>
                   <button
                     type="button"
@@ -365,7 +534,7 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredBooks.length === 0 ? (
+                    {catalogBooks.length === 0 ? (
                       <tr>
                         <td colSpan="5" className="empty-cell">
                           {searchQuery
@@ -374,7 +543,7 @@ export default function App() {
                         </td>
                       </tr>
                     ) : (
-                      filteredBooks.map((book) => (
+                      catalogBooks.map((book) => (
                         <tr key={book.id}>
                           <td className="id-cell">#{book.id}</td>
                           <td className="title-cell font-bold">{book.title}</td>
@@ -445,13 +614,26 @@ export default function App() {
                     className="cream-input"
                     placeholder="e.g. Alice Sharma"
                     value={newMemberName}
-                    onChange={(e) => setNewMemberName(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setNewMemberName(val);
+                      if (/\d/.test(val)) {
+                        setMemberNameError('Member name cannot contain numbers.');
+                      } else {
+                        setMemberNameError('');
+                      }
+                    }}
                     required
                   />
+                  {memberNameError && <span className="inline-error">{memberNameError}</span>}
                 </div>
 
-                <button type="submit" className="pill-button gold-cta">
-                  Register Member
+                <button
+                  type="submit"
+                  className="pill-button gold-cta"
+                  disabled={isSubmittingMember}
+                >
+                  {isSubmittingMember ? 'Registering...' : 'Register Member'}
                 </button>
               </form>
 
@@ -536,16 +718,16 @@ export default function App() {
               <form onSubmit={handleIssueBook} className="form-stacked">
                 <div className="form-group">
                   <label htmlFor="issue-book-id">
-                    Book ID <span className="label-hint">(Available books only)</span>
+                    Book ID <span className="label-hint">(Digits only, positive integer)</span>
                   </label>
                   <input
                     id="issue-book-id"
-                    type="number"
-                    min="1"
+                    type="text"
+                    inputMode="numeric"
                     className="cream-input"
                     placeholder="Enter Book ID"
                     value={issueBookId}
-                    onChange={(e) => setIssueBookId(e.target.value)}
+                    onChange={(e) => setIssueBookId(e.target.value.replace(/[^0-9]/g, ''))}
                     required
                   />
                   {/* Quick-fill chips */}
@@ -569,16 +751,16 @@ export default function App() {
 
                 <div className="form-group">
                   <label htmlFor="issue-member-id">
-                    Member ID <span className="label-hint">(Registered member)</span>
+                    Member ID <span className="label-hint">(Digits only, positive integer)</span>
                   </label>
                   <input
                     id="issue-member-id"
-                    type="number"
-                    min="1"
+                    type="text"
+                    inputMode="numeric"
                     className="cream-input"
                     placeholder="Enter Member ID"
                     value={issueMemberId}
-                    onChange={(e) => setIssueMemberId(e.target.value)}
+                    onChange={(e) => setIssueMemberId(e.target.value.replace(/[^0-9]/g, ''))}
                     required
                   />
                   {/* Quick-fill chips */}
@@ -600,8 +782,12 @@ export default function App() {
                   )}
                 </div>
 
-                <button type="submit" className="pill-button gold-cta full-width">
-                  Issue Book
+                <button
+                  type="submit"
+                  className="pill-button gold-cta full-width"
+                  disabled={isSubmittingIssue}
+                >
+                  {isSubmittingIssue ? 'Issuing...' : 'Issue Book'}
                 </button>
               </form>
 
@@ -649,16 +835,16 @@ export default function App() {
               <form onSubmit={handleReturnBook} className="form-stacked">
                 <div className="form-group">
                   <label htmlFor="return-book-id">
-                    Book ID <span className="label-hint">(Currently issued book)</span>
+                    Book ID <span className="label-hint">(Digits only, positive integer)</span>
                   </label>
                   <input
                     id="return-book-id"
-                    type="number"
-                    min="1"
+                    type="text"
+                    inputMode="numeric"
                     className="cream-input"
                     placeholder="Enter Book ID to Return"
                     value={returnBookId}
-                    onChange={(e) => setReturnBookId(e.target.value)}
+                    onChange={(e) => setReturnBookId(e.target.value.replace(/[^0-9]/g, ''))}
                     required
                   />
                   {/* Quick-fill chips */}
@@ -682,8 +868,12 @@ export default function App() {
                   )}
                 </div>
 
-                <button type="submit" className="pill-button gold-cta full-width">
-                  Return Book
+                <button
+                  type="submit"
+                  className="pill-button gold-cta full-width"
+                  disabled={isSubmittingReturn}
+                >
+                  {isSubmittingReturn ? 'Returning...' : 'Return Book'}
                 </button>
               </form>
 

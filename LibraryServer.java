@@ -16,6 +16,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
+import java.util.regex.Pattern;
 
 /**
  * Smart Library Management System - Core Java HTTP Server
@@ -120,6 +121,21 @@ public class LibraryServer {
     }
 
     /**
+     * Linear search O(M) through ArrayList<Member> to detect duplicate names.
+     * Compares case-insensitively with whitespace normalized.
+     * Treats "John Doe", "john doe", " JOHN DOE ", and "John  Doe" as identical.
+     */
+    private static synchronized Member findMemberByName(String normalizedName) {
+        for (Member member : members) {
+            String existingNormalized = member.getName().trim().replaceAll("\\s+", " ");
+            if (existingNormalized.equalsIgnoreCase(normalizedName)) {
+                return member;
+            }
+        }
+        return null;
+    }
+
+    /**
      * Linear search O(I) to find the active (unreturned) IssueRecord for a Book.
      */
     private static synchronized IssueRecord findActiveIssueByBookId(int bookId) {
@@ -129,6 +145,132 @@ public class LibraryServer {
             }
         }
         return null;
+    }
+
+    // --- Validation Helper Methods ---
+
+    /**
+     * Validates that an ID string consists strictly of digits,
+     * represents a positive integer greater than 0, and fits within Java int range (1 to 2147483647).
+     * Rejects zero, negative numbers, decimals, empty values, '+' signs, scientific notation, and non-digits.
+     */
+    private static int parsePositiveId(String idStr, String fieldName) {
+        if (idStr == null || idStr.trim().isEmpty()) {
+            throw new IllegalArgumentException(fieldName + " is required.");
+        }
+        String trimmed = idStr.trim();
+        if (!trimmed.matches("^[0-9]+$")) {
+            throw new IllegalArgumentException(fieldName + " must contain digits only (no signs, decimals, or scientific notation).");
+        }
+        if (trimmed.equals("0") || trimmed.matches("^0+$")) {
+            throw new IllegalArgumentException(fieldName + " must be a positive integer greater than 0.");
+        }
+        try {
+            long val = Long.parseLong(trimmed);
+            if (val <= 0) {
+                throw new IllegalArgumentException(fieldName + " must be a positive integer greater than 0.");
+            }
+            if (val > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException(fieldName + " exceeds maximum allowable integer limit (" + Integer.MAX_VALUE + ").");
+            }
+            return (int) val;
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(fieldName + " exceeds maximum allowable integer limit (" + Integer.MAX_VALUE + ").");
+        }
+    }
+
+    /**
+     * Validates and normalizes a member's full name.
+     * Requirements:
+     * - Alphabetic names containing spaces (supports multiple words like "John Doe")
+     * - Unicode-aware letter validation (\p{L})
+     * - Reject numeric characters
+     * - Reject empty or whitespace-only
+     * - Trim leading and trailing spaces
+     * - Normalize repeated whitespace (multiple spaces -> single space)
+     * - Do not silently strip numbers or invalid characters; reject them explicitly
+     */
+    private static String validateAndNormalizeMemberName(String rawName) {
+        if (rawName == null || rawName.trim().isEmpty()) {
+            throw new IllegalArgumentException("Member name is required and cannot be empty.");
+        }
+        String trimmed = rawName.trim();
+        if (trimmed.matches(".*\\d.*")) {
+            throw new IllegalArgumentException("Member name cannot contain numbers.");
+        }
+        String normalized = trimmed.replaceAll("\\s+", " ");
+        if (!normalized.matches("^[\\p{L}]+(?:[\\s'-][\\p{L}]+)*$")) {
+            throw new IllegalArgumentException("Member name must contain only alphabetic letters and spaces.");
+        }
+        return normalized;
+    }
+
+    /**
+     * Validates and normalizes a book's title.
+     * Requirements:
+     * - Trim leading and trailing whitespace, normalize multiple internal spaces.
+     * - Reject empty or whitespace-only.
+     * - Reject numeric-only titles (e.g. "12345") - project-specific restriction.
+     * - Reject meaningless punctuation/symbols (must contain alphabetic characters).
+     * - Allow Unicode letters, numbers, spaces, and standard punctuation (. , : ; ' " ( ) & ! ? + # / -).
+     */
+    private static String validateAndNormalizeBookTitle(String rawTitle) {
+        if (rawTitle == null || rawTitle.trim().isEmpty()) {
+            throw new IllegalArgumentException("Book title is required and cannot be empty.");
+        }
+        String trimmed = rawTitle.trim();
+        String normalized = trimmed.replaceAll("\\s+", " ");
+
+        // Reject numeric-only input (project-specific restriction)
+        if (normalized.matches("^[0-9]+$")) {
+            throw new IllegalArgumentException("Book title cannot be numeric-only.");
+        }
+
+        // Must contain at least one alphabetic letter (rejects punctuation-only like @@@ or !!!)
+        if (!normalized.matches(".*\\p{L}.*")) {
+            throw new IllegalArgumentException("Book title must contain alphabetic characters.");
+        }
+
+        // Must consist of letters, digits, spaces, and allowed punctuation
+        if (!normalized.matches("^[\\p{L}0-9\\s.,:;\'\"()&!?+#/-]+$")) {
+            throw new IllegalArgumentException("Book title contains invalid special characters.");
+        }
+
+        return normalized;
+    }
+
+    /**
+     * Validates and normalizes an author's name.
+     * Requirements:
+     * - Trim leading and trailing whitespace, normalize multiple internal spaces.
+     * - Reject numeric characters and numeric-only values.
+     * - Reject empty or whitespace-only.
+     * - Must contain alphabetic characters.
+     * - Supports multi-word names, Unicode letters, and standard name punctuation (., -, ').
+     */
+    private static String validateAndNormalizeAuthorName(String rawAuthor) {
+        if (rawAuthor == null || rawAuthor.trim().isEmpty()) {
+            throw new IllegalArgumentException("Author name is required and cannot be empty.");
+        }
+        String trimmed = rawAuthor.trim();
+        String normalized = trimmed.replaceAll("\\s+", " ");
+
+        // Reject numeric characters
+        if (normalized.matches(".*\\d.*")) {
+            throw new IllegalArgumentException("Author name cannot contain numbers.");
+        }
+
+        // Must contain at least one alphabetic letter
+        if (!normalized.matches(".*\\p{L}.*")) {
+            throw new IllegalArgumentException("Author name must contain alphabetic characters.");
+        }
+
+        // Must contain only Unicode letters, spaces, and valid name punctuation (., -, ')
+        if (!normalized.matches("^[\\p{L}][\\p{L}.'-]*(?:\\s+[\\p{L}][\\p{L}.'-]*)*$")) {
+            throw new IllegalArgumentException("Author name must contain only alphabetic letters, spaces, and valid punctuation (., -, ').");
+        }
+
+        return normalized;
     }
 
     // --- JSON & HTTP Helpers ---
@@ -206,32 +348,34 @@ public class LibraryServer {
             for (String pair : pairs) {
                 int idx = pair.indexOf("=");
                 if (idx > 0) {
-                    String key = URLDecoder.decode(pair.substring(0, idx), StandardCharsets.UTF_8.name());
-                    String value = (idx < pair.length() - 1)
-                            ? URLDecoder.decode(pair.substring(idx + 1), StandardCharsets.UTF_8.name())
-                            : "";
-                    map.put(key, value);
+                    try {
+                        String key = URLDecoder.decode(pair.substring(0, idx), StandardCharsets.UTF_8);
+                        String value = (idx < pair.length() - 1)
+                                ? URLDecoder.decode(pair.substring(idx + 1), StandardCharsets.UTF_8)
+                                : "";
+                        map.put(key, value);
+                    } catch (IllegalArgumentException ignored) {}
                 }
             }
         }
         return map;
     }
 
-    private static Map<String, String> parseQueryParams(String query) {
+    private static Map<String, String> parseQueryParams(String rawQuery) {
         Map<String, String> map = new HashMap<>();
-        if (query == null || query.isEmpty()) return map;
-        String[] pairs = query.split("&");
+        if (rawQuery == null || rawQuery.isEmpty()) return map;
+        String[] pairs = rawQuery.split("&");
         for (String pair : pairs) {
             int idx = pair.indexOf("=");
             try {
                 if (idx > 0) {
-                    String key = URLDecoder.decode(pair.substring(0, idx), StandardCharsets.UTF_8.name());
+                    String key = URLDecoder.decode(pair.substring(0, idx), StandardCharsets.UTF_8);
                     String value = (idx < pair.length() - 1)
-                            ? URLDecoder.decode(pair.substring(idx + 1), StandardCharsets.UTF_8.name())
+                            ? URLDecoder.decode(pair.substring(idx + 1), StandardCharsets.UTF_8)
                             : "";
                     map.put(key, value);
                 } else if (idx == -1) {
-                    map.put(URLDecoder.decode(pair, StandardCharsets.UTF_8.name()), "");
+                    map.put(URLDecoder.decode(pair, StandardCharsets.UTF_8), "");
                 }
             } catch (Exception ignored) {}
         }
@@ -243,6 +387,7 @@ public class LibraryServer {
     /**
      * Handler for /books:
      * GET: Search and filter book catalog via ArrayList traversal O(B).
+     *      Uses case-insensitive and Unicode-aware regex matching with literal Pattern.quote().
      * POST: Add a new book to catalog.
      */
     static class BooksHandler implements HttpHandler {
@@ -256,15 +401,22 @@ public class LibraryServer {
             }
 
             if ("GET".equalsIgnoreCase(method)) {
-                Map<String, String> queryParams = parseQueryParams(exchange.getRequestURI().getQuery());
-                String search = queryParams.getOrDefault("search", "").trim().toLowerCase();
-                String filter = queryParams.getOrDefault("filter", "").trim().toLowerCase();
-                boolean availableOnly = "available".equals(filter);
+                String rawQuery = exchange.getRequestURI().getRawQuery();
+                Map<String, String> queryParams = parseQueryParams(rawQuery);
+                String search = queryParams.getOrDefault("search", "").trim();
+                String filter = queryParams.getOrDefault("filter", "").trim();
+                boolean availableOnly = "available".equalsIgnoreCase(filter);
+
+                // Compile regex once per search request, not once per book
+                Pattern pattern = null;
+                if (!search.isEmpty()) {
+                    pattern = Pattern.compile(Pattern.quote(search), Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+                }
 
                 StringBuilder jsonBuilder = new StringBuilder("[");
                 boolean first = true;
 
-                synchronized (books) {
+                synchronized (LibraryServer.class) {
                     // Linear traversal of ArrayList<Book>
                     for (Book book : books) {
                         // Availability filter
@@ -272,10 +424,10 @@ public class LibraryServer {
                             continue;
                         }
 
-                        // Search by title or author (case-insensitive)
-                        if (!search.isEmpty()) {
-                            boolean matchesTitle = book.getTitle().toLowerCase().contains(search);
-                            boolean matchesAuthor = book.getAuthor().toLowerCase().contains(search);
+                        // Search by title or author (case-insensitive literal regex)
+                        if (pattern != null) {
+                            boolean matchesTitle = pattern.matcher(book.getTitle()).find();
+                            boolean matchesAuthor = pattern.matcher(book.getAuthor()).find();
                             if (!matchesTitle && !matchesAuthor) {
                                 continue;
                             }
@@ -294,17 +446,22 @@ public class LibraryServer {
 
             if ("POST".equalsIgnoreCase(method)) {
                 Map<String, String> formData = parseFormData(exchange);
-                String title = formData.get("title");
-                String author = formData.get("author");
+                String rawTitle = formData.get("title");
+                String rawAuthor = formData.get("author");
 
-                if (title == null || title.trim().isEmpty() || author == null || author.trim().isEmpty()) {
-                    sendError(exchange, 400, "Both 'title' and 'author' are required.");
+                String normalizedTitle;
+                String normalizedAuthor;
+                try {
+                    normalizedTitle = validateAndNormalizeBookTitle(rawTitle);
+                    normalizedAuthor = validateAndNormalizeAuthorName(rawAuthor);
+                } catch (IllegalArgumentException e) {
+                    sendError(exchange, 400, e.getMessage());
                     return;
                 }
 
                 Book newBook;
-                synchronized (books) {
-                    newBook = new Book(nextBookId++, title.trim(), author.trim(), true);
+                synchronized (LibraryServer.class) {
+                    newBook = new Book(nextBookId++, normalizedTitle, normalizedAuthor, true);
                     books.add(newBook);
                 }
 
@@ -319,7 +476,7 @@ public class LibraryServer {
     /**
      * Handler for /members:
      * GET: List all registered members via ArrayList traversal O(M).
-     * POST: Register a new member.
+     * POST: Register a new member with duplicate-name prevention and input validation.
      */
     static class MembersHandler implements HttpHandler {
         @Override
@@ -335,7 +492,7 @@ public class LibraryServer {
                 StringBuilder jsonBuilder = new StringBuilder("[");
                 boolean first = true;
 
-                synchronized (members) {
+                synchronized (LibraryServer.class) {
                     // Linear traversal of ArrayList<Member>
                     for (Member member : members) {
                         if (!first) jsonBuilder.append(",");
@@ -351,16 +508,26 @@ public class LibraryServer {
 
             if ("POST".equalsIgnoreCase(method)) {
                 Map<String, String> formData = parseFormData(exchange);
-                String name = formData.get("name");
+                String rawName = formData.get("name");
 
-                if (name == null || name.trim().isEmpty()) {
-                    sendError(exchange, 400, "Member 'name' is required.");
+                String normalizedName;
+                try {
+                    normalizedName = validateAndNormalizeMemberName(rawName);
+                } catch (IllegalArgumentException e) {
+                    sendError(exchange, 400, e.getMessage());
                     return;
                 }
 
                 Member newMember;
-                synchronized (members) {
-                    newMember = new Member(nextMemberId++, name.trim());
+                synchronized (LibraryServer.class) {
+                    // Linear search O(M) for duplicate member name (case-insensitive, normalized spaces)
+                    Member existing = findMemberByName(normalizedName);
+                    if (existing != null) {
+                        sendError(exchange, 409, "Member with name '" + normalizedName + "' is already registered (Member ID #" + existing.getId() + ").");
+                        return;
+                    }
+
+                    newMember = new Member(nextMemberId++, normalizedName);
                     members.add(newMember);
                 }
 
@@ -396,22 +563,13 @@ public class LibraryServer {
             String bookIdStr = formData.get("bookId");
             String memberIdStr = formData.get("memberId");
 
-            if (bookIdStr == null || memberIdStr == null || bookIdStr.trim().isEmpty() || memberIdStr.trim().isEmpty()) {
-                sendError(exchange, 400, "Both 'bookId' and 'memberId' are required.");
-                return;
-            }
-
             int bookId;
             int memberId;
             try {
-                bookId = Integer.parseInt(bookIdStr.trim());
-                memberId = Integer.parseInt(memberIdStr.trim());
-                if (bookId <= 0 || memberId <= 0) {
-                    sendError(exchange, 400, "Book ID and Member ID must be positive integers.");
-                    return;
-                }
-            } catch (NumberFormatException e) {
-                sendError(exchange, 400, "Book ID and Member ID must be valid integers.");
+                bookId = parsePositiveId(bookIdStr, "Book ID");
+                memberId = parsePositiveId(memberIdStr, "Member ID");
+            } catch (IllegalArgumentException e) {
+                sendError(exchange, 400, e.getMessage());
                 return;
             }
 
@@ -479,20 +637,11 @@ public class LibraryServer {
             Map<String, String> formData = parseFormData(exchange);
             String bookIdStr = formData.get("bookId");
 
-            if (bookIdStr == null || bookIdStr.trim().isEmpty()) {
-                sendError(exchange, 400, "'bookId' is required.");
-                return;
-            }
-
             int bookId;
             try {
-                bookId = Integer.parseInt(bookIdStr.trim());
-                if (bookId <= 0) {
-                    sendError(exchange, 400, "Book ID must be a positive integer.");
-                    return;
-                }
-            } catch (NumberFormatException e) {
-                sendError(exchange, 400, "Book ID must be a valid integer.");
+                bookId = parsePositiveId(bookIdStr, "Book ID");
+            } catch (IllegalArgumentException e) {
+                sendError(exchange, 400, e.getMessage());
                 return;
             }
 
