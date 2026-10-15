@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Production builds
+dist/
+
+# Java compiled files
+*.class
+
+# Environment and logs
+.env
+*.log
+
+# OS specific files
+.DS_Store
+Thumbs.db
